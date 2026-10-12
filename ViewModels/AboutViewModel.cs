@@ -42,6 +42,10 @@ public partial class AboutViewModel : ObservableObject
             "可在软件内的显示设置力关闭封面刮削即可"),
         new("开启修改器绑定游戏后修改器不自启动",
             "去修改器页安装后台服务，并保持对应绑定的启用开关打开"),
+        new("启动游戏报错 Error 54",
+            "可以通过使用软件内免steam功能区的脱壳来解决"),
+        new("启动 Steam 弹窗报错“不受支持的 Steam 版本”",
+            "首选确保你的 Steam 没有选中使用 Beta 版本，如还报错，可根据报错框中的方法2来解决，也就是从方法3的上游github链接中下载一个方法2中同hash的toml文件放到方法2中所演示的路径内，然后重启 Steam 即可解决\n或者也可以在软件内的右下角OST管理内一键下载获取"),
     };
 
     public AboutViewModel()

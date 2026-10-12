@@ -1,5 +1,6 @@
 using System.IO;
 using System.IO.Compression;
+using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
@@ -21,7 +22,16 @@ public interface IOpenSteamToolService
     Task<int> EnableKernelAsync();
     Task<IReadOnlyList<ForeignKernelFile>> ScanForeignKernelsAsync();
     Task<(int removed, List<string> failed)> PurifyForeignKernelsAsync(IEnumerable<string> relativePaths);
+    Task<SteamDllTomlInfo?> DetectSteamDllInfoAsync();
+    Task<IReadOnlyList<TomlFetchResult>> FetchTomlFilesAsync(SteamDllTomlInfo info, IProgress<string>? status = null, IProgress<int>? downloadProgress = null, CancellationToken ct = default);
 }
+
+// 当前安装 Steam 的两个 DLL 指纹：OST 解析签名文件的唯一依据（与内核 RemoteToml 同规则）
+public sealed record SteamDllTomlInfo(string BuildId, string ClientSha, string UiSha);
+
+// 单个 toml 的下载结果：文件名 + 落盘路径 + 成败 + 是否上游 404（404=版本不受支持，
+// 文案让用户更新正式版；其他失败=网络问题，文案让查网络，两类 advice 不能混）
+public sealed record TomlFetchResult(string FileName, string TargetPath, bool Success, string? Error, bool NotFound = false);
 
 // 扫描到的第三方内核文件：相对路径 + 所属内核标注（确认框逐字展示用）
 public sealed record ForeignKernelFile(string RelativePath, string Owner);
@@ -474,5 +484,176 @@ public class OpenSteamToolService : IOpenSteamToolService
         using var stream = File.OpenRead(filePath);
         var hash = sha256.ComputeHash(stream);
         return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    // ========== 一键获取 toml ==========
+
+    // OST 的 toml 文件名/内容都以 DLL 的 SHA256 为准（与内核 RemoteToml 同规则）：
+    // pattern/steamclient、pattern/steamui、ipc/steamclient 共 3 个文件
+    private static readonly (string Channel, string Component)[] TomlTargets =
+    [
+        ("pattern", "steamclient"),
+        ("pattern", "steamui"),
+        ("ipc", "steamclient"),
+    ];
+
+    private static string JsdelivrTomlUrl(string channel, string component, string sha)
+        => $"https://cdn.jsdelivr.net/gh/OpenSteam001/steam-monitor@{channel}/{component}/{sha}.toml";
+
+    private static string GitHubTomlUrl(string channel, string component, string sha)
+        => $"https://raw.githubusercontent.com/OpenSteam001/steam-monitor/{channel}/{component}/{sha}.toml";
+
+    public Task<SteamDllTomlInfo?> DetectSteamDllInfoAsync()
+    {
+        var steamPath = GetSteamPath();
+        if (string.IsNullOrEmpty(steamPath)) return Task.FromResult<SteamDllTomlInfo?>(null);
+        var clientPath = Path.Combine(steamPath, "steamclient64.dll");
+        var uiPath = Path.Combine(steamPath, "steamui.dll");
+        if (!File.Exists(clientPath) || !File.Exists(uiPath)) return Task.FromResult<SteamDllTomlInfo?>(null);
+
+        try
+        {
+            var clientSha = ComputeSha256(clientPath);
+            var uiSha = ComputeSha256(uiPath);
+            var buildId = ReadSteamBuildId(steamPath);
+            return Task.FromResult<SteamDllTomlInfo?>(new SteamDllTomlInfo(buildId, clientSha, uiSha));
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("内核", $"识别 Steam DLL 指纹失败：{ex.Message}");
+            return Task.FromResult<SteamDllTomlInfo?>(null);
+        }
+    }
+
+    public async Task<IReadOnlyList<TomlFetchResult>> FetchTomlFilesAsync(SteamDllTomlInfo info, IProgress<string>? status = null, IProgress<int>? downloadProgress = null, CancellationToken ct = default)
+    {
+        var steamPath = GetSteamPath();
+        if (string.IsNullOrEmpty(steamPath)) throw new InvalidOperationException("未找到 Steam 安装路径");
+        var results = new List<TomlFetchResult>();
+
+        for (var i = 0; i < TomlTargets.Length; i++)
+        {
+            var (channel, component) = TomlTargets[i];
+            ct.ThrowIfCancellationRequested();
+            var sha = component == "steamui" ? info.UiSha : info.ClientSha;
+            var fileName = $"{sha}.toml";
+            var dir = Path.Combine(steamPath, "opensteamtool", channel, component);
+            var targetPath = Path.Combine(dir, fileName);
+            Directory.CreateDirectory(dir);
+            downloadProgress?.Report(i * 100 / TomlTargets.Length);
+
+            // 与内核一致：优先 jsdelivr，失败再走 github；同名文件直接覆盖
+            var urls = new[] { JsdelivrTomlUrl(channel, component, sha), GitHubTomlUrl(channel, component, sha) };
+            Exception? lastError = null;
+            // 404 单独记：两个源全 404=上游没这个版本（让用户更新正式版）；
+            // 混进任何一个非 404 失败=网络问题（让用户查网络），advice 不能混
+            var notFoundOnly = true;
+            var done = false;
+            foreach (var url in urls)
+            {
+                try
+                {
+                    status?.Report($"正在下载 {fileName}...");
+                    var bytes = await _httpClientProvider.SendWithProxyRetryAsync(
+                        "ost-toml",
+                        TimeSpan.FromSeconds(30),
+                        client => client.GetByteArrayAsync(url, ct));
+                    if (bytes == null || bytes.Length == 0) throw new InvalidOperationException("远端返回空内容");
+                    // 原子替换：先落临时文件再搬家，崩溃也不留截断文件祸害已存在的源文件
+                    var tmpPath = targetPath + ".tmp";
+                    try
+                    {
+                        await File.WriteAllBytesAsync(tmpPath, bytes, ct);
+                        File.Move(tmpPath, targetPath, overwrite: true);
+                    }
+                    catch
+                    {
+                        try { File.Delete(tmpPath); } catch { }
+                        throw;
+                    }
+                    LogService.Info("内核", $"toml 已获取：{channel}/{component}/{fileName}（{bytes.Length} 字节）");
+                    results.Add(new TomlFetchResult(fileName, targetPath, true, null));
+                    done = true;
+                    break;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    lastError = ex;
+                    if (ex is not HttpRequestException { StatusCode: HttpStatusCode.NotFound })
+                        notFoundOnly = false;
+                    LogService.Warn("内核", $"toml 下载源失败 ({url}): {ex.Message}");
+                }
+            }
+
+            if (!done)
+                results.Add(new TomlFetchResult(fileName, targetPath, false, lastError?.Message ?? "下载失败", notFoundOnly));
+        }
+
+        downloadProgress?.Report(100);
+        return results;
+    }
+
+    // BuildID 外部唯一可靠来源：logs\bootstrap_log.txt 里"本次启动块"中最新一行
+    // "... steam_client_win64 version X, installed version Y" 的 Y，
+    // 与内核调 steam.exe!GetBootstrapperVersion 拿到的数是同一个（已对过 1788652215）。
+    // 必须以 "Startup - Steam Client launched with:" 为界：日志是追加的，
+    // 直接取全文最后一行会吃到上个版本（比如刚从 Beta 换回正式版）的残留。
+    // 块内优先级：非零 installed version（已装好的）> 同块 manifest 的 version
+    // （刚切换版本、还没落盘 installed 行的过渡期，manifest 版就是要装的目标版）。
+    // 匹配 beta 行（publicbeta 同样含 steam_client 子串），beta 用户显示自己的号。
+    // 都没有才记未知（展示用，下载用不到它）。
+    private static string ReadSteamBuildId(string steamPath)
+    {
+        const string marker = "Steam Client launched with:";
+        try
+        {
+            var logPath = Path.Combine(steamPath, "logs", "bootstrap_log.txt");
+            if (!File.Exists(logPath))
+            {
+                LogService.Warn("内核", "未找到 bootstrap_log.txt，Steam 构建ID未知");
+                return "未知";
+            }
+            // Steam 运行时独占着这个日志，必须用 ReadWrite 共享模式才能读；
+            // 万一它用的是完全独占（Share.None），这里照样打不开，外层 catch 记未知
+            using var stream = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(stream);
+            string? installed = null;
+            string? manifest = null;
+            bool inCurrentBlock = false;
+            string? line;
+            while ((line = reader.ReadLine()) != null)
+            {
+                if (line.Contains(marker, StringComparison.Ordinal))
+                {
+                    // 新一次启动：块内重找，旧块残留作废
+                    inCurrentBlock = true;
+                    installed = null;
+                    manifest = null;
+                    continue;
+                }
+                if (!inCurrentBlock) continue;
+                if (!line.Contains("steam_client", StringComparison.Ordinal)) continue;
+                var mi = Regex.Match(line, @"installed version (\d+)");
+                if (mi.Success && mi.Groups[1].Value != "0")
+                {
+                    installed = mi.Groups[1].Value;
+                    continue;
+                }
+                // installed 为 0/缺失：取同行 manifest 的 version（刚切换版本的过渡期用）。
+                // 只认下载行，避免 existing pending version 之类的数字误命中。
+                if (!line.Contains("Download", StringComparison.Ordinal)) continue;
+                var mv = Regex.Match(line, @"version (\d+)");
+                if (mv.Success && mv.Groups[1].Value != "0")
+                    manifest = mv.Groups[1].Value;
+            }
+            var buildId = installed ?? manifest ?? "未知";
+            LogService.Info("内核", $"识别到 Steam 构建ID：{buildId}");
+            return buildId;
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("内核", $"读取 Steam 构建ID失败：{ex.Message}");
+            return "未知";
+        }
     }
 }

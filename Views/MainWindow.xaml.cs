@@ -58,6 +58,10 @@ public partial class MainWindow : Window
     private readonly AboutView _aboutView;
     private readonly IOpenSteamToolService _openSteamToolService;
     private CancellationTokenSource? _kernelCts;
+    // toml 获取独立 cts：跟内核下载的 _kernelCts 分开，互不干扰；
+    // _tomlFetching 防重入：静默下载时手快再点一次会撞 ContentDialog 互斥直接闪退
+    private CancellationTokenSource? _tomlCts;
+    private bool _tomlFetching;
     private TrayIconManager? _trayIcon;
     private bool _exitRequested;
 
@@ -481,6 +485,7 @@ public partial class MainWindow : Window
     private void KernelCancelButton_Click(object sender, RoutedEventArgs e)
     {
         _kernelCts?.Cancel();
+        _tomlCts?.Cancel();
     }
 
     // 背景材质只影响美观，任何异常都回退纯色不断运行；
@@ -1151,6 +1156,9 @@ public partial class MainWindow : Window
                 isInstalled && !hasDisabled),
             KernelMenuItem.Separator(),
             new KernelMenuItem("purify", "净化环境", "识别并删除第三方内核", "\uE71C",
+                primaryBrush, secondaryBrush),
+            KernelMenuItem.Separator(),
+            new KernelMenuItem("fetch-toml", "一键获取toml文件", "自动获取所需toml文件", "\uE896",
                 primaryBrush, secondaryBrush)
         };
 
@@ -1182,6 +1190,9 @@ public partial class MainWindow : Window
                 break;
             case "purify":
                 await PurifyKernelAsync();
+                break;
+            case "fetch-toml":
+                await FetchTomlFilesAsync();
                 break;
         }
     }
@@ -1453,6 +1464,281 @@ public partial class MainWindow : Window
         {
             await ShowModernDialogAsync("错误", $"净化失败：{ex.Message}");
         }
+    }
+
+    private async Task FetchTomlFilesAsync()
+    {
+        // 防重入：上一次全流程（确认框/下载/结果框）没走完又点一次，
+        // 两个 ContentDialog 互斥直接闪退（已实测）。静默吞掉，只记日志。
+        if (_tomlFetching)
+        {
+            LogService.Info("操作", "一键获取toml文件：上一次尚未完成，忽略本次点击");
+            return;
+        }
+        _tomlFetching = true;
+        try
+        {
+            await FetchTomlFilesCoreAsync();
+        }
+        finally
+        {
+            _tomlFetching = false;
+        }
+    }
+
+    private async Task FetchTomlFilesCoreAsync()
+    {
+        // 先识别再问：把构建ID和两个SHA摆出来让用户确认，避免下错版本
+        SteamDllTomlInfo? info;
+        try
+        {
+            info = await _openSteamToolService.DetectSteamDllInfoAsync();
+        }
+        catch (Exception ex)
+        {
+            await ShowModernDialogAsync("错误", $"识别 Steam DLL 指纹失败：{ex.Message}");
+            return;
+        }
+
+        if (info == null)
+        {
+            await ShowModernDialogAsync("未找到 Steam", "未能定位 Steam 安装目录或 steamclient64.dll / steamui.dll 缺失。");
+            return;
+        }
+
+        // 确认框抄删除存档的结构化面板：分节标题加粗 + 条目 + 灰色路径，平铺没识别感不干
+        var secondary = Application.Current.TryFindResource("TextFillColorSecondaryBrush") as Brush
+            ?? Brushes.Gray;
+        var fetchPanel = new StackPanel { MaxWidth = 560 };
+        fetchPanel.Children.Add(new TextBlock
+        {
+            Text = "识别结果",
+            FontWeight = FontWeights.SemiBold,
+            Margin = new Thickness(0, 0, 0, 2)
+        });
+        fetchPanel.Children.Add(new TextBlock
+        {
+            Text = $"Steam 构建ID：{info.BuildId}",
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 6, 0, 0)
+        });
+        fetchPanel.Children.Add(new TextBlock
+        {
+            Text = "steamclient64.dll SHA：",
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 6, 0, 0)
+        });
+        fetchPanel.Children.Add(new TextBlock
+        {
+            Text = info.ClientSha,
+            TextWrapping = TextWrapping.Wrap,
+            FontSize = 12,
+            Foreground = secondary
+        });
+        fetchPanel.Children.Add(new TextBlock
+        {
+            Text = "steamui.dll SHA：",
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 6, 0, 0)
+        });
+        fetchPanel.Children.Add(new TextBlock
+        {
+            Text = info.UiSha,
+            TextWrapping = TextWrapping.Wrap,
+            FontSize = 12,
+            Foreground = secondary
+        });
+        fetchPanel.Children.Add(new TextBlock
+        {
+            Text = "将获取文件",
+            FontWeight = FontWeights.SemiBold,
+            Margin = new Thickness(0, 12, 0, 2)
+        });
+        foreach (var (channel, component) in new[] { ("pattern", "steamclient"), ("pattern", "steamui"), ("ipc", "steamclient") })
+        {
+            var sha = component == "steamui" ? info.UiSha : info.ClientSha;
+            fetchPanel.Children.Add(new TextBlock
+            {
+                Text = $"- {channel}/{component}/{sha}.toml",
+                TextWrapping = TextWrapping.Wrap,
+                FontSize = 12,
+                Foreground = secondary,
+                Margin = new Thickness(0, 4, 0, 0)
+            });
+        }
+        fetchPanel.Children.Add(new TextBlock
+        {
+            Text = "说明",
+            FontWeight = FontWeights.SemiBold,
+            Margin = new Thickness(0, 12, 0, 2)
+        });
+        fetchPanel.Children.Add(new TextBlock
+        {
+            Text = "同名文件直接覆盖；重启 Steam 后生效。",
+            TextWrapping = TextWrapping.Wrap
+        });
+        fetchPanel.Children.Add(new TextBlock
+        {
+            Text = "是否自动获取toml文件？",
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 6, 0, 0)
+        });
+        var fetchDialog = new ContentDialog
+        {
+            Title = "一键获取toml文件",
+            Content = new ScrollViewer
+            {
+                Content = fetchPanel,
+                MaxHeight = 440,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+            },
+            PrimaryButtonText = "获取",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Primary
+        };
+        if (await fetchDialog.ShowAsync() != ContentDialogResult.Primary) return;
+
+        ShowKernelOverlay("正在获取toml文件...");
+        _tomlCts = new CancellationTokenSource();
+        IReadOnlyList<TomlFetchResult> results;
+        try
+        {
+            var status = new Progress<string>(msg => KernelOverlayStatus.Text = msg);
+            var progress = new Progress<int>(pct => UpdateKernelOverlayProgress(pct));
+            ShowKernelDownloadHint();
+            results = await _openSteamToolService.FetchTomlFilesAsync(info, status, progress, _tomlCts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            await ShowModernDialogAsync("错误", $"获取失败：{ex.Message}");
+            return;
+        }
+        finally
+        {
+            _tomlCts?.Dispose();
+            _tomlCts = null;
+            HideKernelOverlay();
+            // 注意：_tomlFetching 不在这里清，归外层 wrapper 管——结果框还开着时
+            // 就清掉，对方点一次菜单就能再弹确认框叠上来，前面修的闪退白修了
+        }
+
+        var ok = results.Where(r => r.Success).ToList();
+        var failed = results.Where(r => !r.Success).ToList();
+        var notFound = failed.Where(r => r.NotFound).ToList();
+        var netFailed = failed.Where(r => !r.NotFound).ToList();
+        LogService.Info("操作", $"一键获取toml文件：成功 {ok.Count} 个，失败 {failed.Count} 个（404 {notFound.Count} 个）");
+
+        // 结果框抄确认框的结构：分节 + 灰色路径。404 和网络失败 advice 不能混：
+        // 404=上游没这个版本（多为 Beta 版 Steam），让人更新正式版；其他失败=网络问题，让人查网络
+        var resultPanel = new StackPanel { MaxWidth = 560 };
+        if (ok.Count > 0)
+        {
+            resultPanel.Children.Add(new TextBlock
+            {
+                Text = "已就位：",
+                FontWeight = FontWeights.SemiBold,
+                Margin = new Thickness(0, 0, 0, 2)
+            });
+            foreach (var r in ok)
+            {
+                resultPanel.Children.Add(new TextBlock
+                {
+                    Text = $"• {r.FileName}",
+                    TextWrapping = TextWrapping.Wrap,
+                    FontSize = 12,
+                    Foreground = secondary,
+                    Margin = new Thickness(0, 4, 0, 0)
+                });
+            }
+        }
+        if (notFound.Count > 0)
+        {
+            resultPanel.Children.Add(new TextBlock
+            {
+                Text = "上游暂无以下版本文件：",
+                FontWeight = FontWeights.SemiBold,
+                Margin = new Thickness(0, 12, 0, 2)
+            });
+            foreach (var r in notFound)
+            {
+                resultPanel.Children.Add(new TextBlock
+                {
+                    Text = $"• {r.FileName}",
+                    TextWrapping = TextWrapping.Wrap,
+                    FontSize = 12,
+                    Foreground = secondary,
+                    Margin = new Thickness(0, 4, 0, 0)
+                });
+            }
+            resultPanel.Children.Add(new TextBlock
+            {
+                Text = "当前 Steam 版本不受支持，可能为测试版（Beta）Steam。请更新到最新正式版 Steam 后重试。",
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 6, 0, 0)
+            });
+        }
+        if (netFailed.Count > 0)
+        {
+            resultPanel.Children.Add(new TextBlock
+            {
+                Text = "下载失败：",
+                FontWeight = FontWeights.SemiBold,
+                Margin = new Thickness(0, 12, 0, 2)
+            });
+            foreach (var r in netFailed)
+            {
+                resultPanel.Children.Add(new TextBlock
+                {
+                    Text = $"• {r.FileName}：{r.Error}",
+                    TextWrapping = TextWrapping.Wrap,
+                    FontSize = 12,
+                    Foreground = secondary,
+                    Margin = new Thickness(0, 4, 0, 0)
+                });
+            }
+            resultPanel.Children.Add(new TextBlock
+            {
+                Text = "请检查网络后重试。",
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 6, 0, 0)
+            });
+        }
+        // 全失败就别留重启按钮和重启文案：啥都没拿到，重启也没用
+        var anyOk = ok.Count > 0;
+        if (anyOk)
+        {
+            resultPanel.Children.Add(new TextBlock
+            {
+                Text = "重启 Steam 后生效。",
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 6, 0, 0)
+            });
+        }
+        // 左蓝重启、右灰确定：Primary 点了就是重启，X/Esc/确定走 None 直接关，不会误重启。
+        // 全失败时只要确定一个钮（重启了也没用，不给）。
+        var resultDialog = new ContentDialog
+        {
+            Title = failed.Count == 0 ? "获取完成" : "部分失败",
+            Content = new ScrollViewer
+            {
+                Content = resultPanel,
+                MaxHeight = 440,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+            },
+            PrimaryButtonText = anyOk ? "重启 Steam" : "确定",
+            SecondaryButtonText = anyOk ? "确定" : null,
+            DefaultButton = ContentDialogButton.Primary
+        };
+        var dialogResult = await resultDialog.ShowAsync();
+        if (!anyOk || dialogResult != ContentDialogResult.Primary) return;
+
+        var restartResult = SteamProcess.RestartSteam(_steamPathService);
+        if (!restartResult.Ok)
+            await ShowModernDialogAsync(restartResult.Title, restartResult.Message);
     }
 
     private void PositionSubmenuRelative(Border submenu, Border trigger, ItemsControl list, double subW, double subH)

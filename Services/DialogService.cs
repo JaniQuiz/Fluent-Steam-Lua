@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -132,18 +131,6 @@ public sealed class DialogService : IDialogService
                         FontSize = 12,
                         Foreground = secondary
                     });
-                    var openBackupButton = new Button
-                    {
-                        Content = "打开备份目录",
-                        Margin = new Thickness(0, 6, 0, 0),
-                        HorizontalAlignment = HorizontalAlignment.Left
-                    };
-                    openBackupButton.Click += (_, _) =>
-                    {
-                        try { Process.Start(new ProcessStartInfo { FileName = backupDir, UseShellExecute = true })?.Dispose(); }
-                        catch { }
-                    };
-                    panel.Children.Add(openBackupButton);
 
                     return new ContentDialog
                     {
