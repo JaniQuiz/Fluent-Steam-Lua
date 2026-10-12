@@ -1518,12 +1518,6 @@ public partial class MainWindow : Window
         });
         fetchPanel.Children.Add(new TextBlock
         {
-            Text = $"Steam 构建ID：{info.BuildId}",
-            TextWrapping = TextWrapping.Wrap,
-            Margin = new Thickness(0, 6, 0, 0)
-        });
-        fetchPanel.Children.Add(new TextBlock
-        {
             Text = "steamclient64.dll SHA：",
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 6, 0, 0)

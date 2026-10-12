@@ -27,7 +27,7 @@ public interface IOpenSteamToolService
 }
 
 // 当前安装 Steam 的两个 DLL 指纹：OST 解析签名文件的唯一依据（与内核 RemoteToml 同规则）
-public sealed record SteamDllTomlInfo(string BuildId, string ClientSha, string UiSha);
+public sealed record SteamDllTomlInfo(string ClientSha, string UiSha);
 
 // 单个 toml 的下载结果：文件名 + 落盘路径 + 成败 + 是否上游 404（404=版本不受支持，
 // 文案让用户更新正式版；其他失败=网络问题，文案让查网络，两类 advice 不能混）
@@ -515,8 +515,7 @@ public class OpenSteamToolService : IOpenSteamToolService
         {
             var clientSha = ComputeSha256(clientPath);
             var uiSha = ComputeSha256(uiPath);
-            var buildId = ReadSteamBuildId(steamPath);
-            return Task.FromResult<SteamDllTomlInfo?>(new SteamDllTomlInfo(buildId, clientSha, uiSha));
+            return Task.FromResult<SteamDllTomlInfo?>(new SteamDllTomlInfo(clientSha, uiSha));
         }
         catch (Exception ex)
         {
@@ -593,67 +592,4 @@ public class OpenSteamToolService : IOpenSteamToolService
         return results;
     }
 
-    // BuildID 外部唯一可靠来源：logs\bootstrap_log.txt 里"本次启动块"中最新一行
-    // "... steam_client_win64 version X, installed version Y" 的 Y，
-    // 与内核调 steam.exe!GetBootstrapperVersion 拿到的数是同一个（已对过 1788652215）。
-    // 必须以 "Startup - Steam Client launched with:" 为界：日志是追加的，
-    // 直接取全文最后一行会吃到上个版本（比如刚从 Beta 换回正式版）的残留。
-    // 块内优先级：非零 installed version（已装好的）> 同块 manifest 的 version
-    // （刚切换版本、还没落盘 installed 行的过渡期，manifest 版就是要装的目标版）。
-    // 匹配 beta 行（publicbeta 同样含 steam_client 子串），beta 用户显示自己的号。
-    // 都没有才记未知（展示用，下载用不到它）。
-    private static string ReadSteamBuildId(string steamPath)
-    {
-        const string marker = "Steam Client launched with:";
-        try
-        {
-            var logPath = Path.Combine(steamPath, "logs", "bootstrap_log.txt");
-            if (!File.Exists(logPath))
-            {
-                LogService.Warn("内核", "未找到 bootstrap_log.txt，Steam 构建ID未知");
-                return "未知";
-            }
-            // Steam 运行时独占着这个日志，必须用 ReadWrite 共享模式才能读；
-            // 万一它用的是完全独占（Share.None），这里照样打不开，外层 catch 记未知
-            using var stream = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            using var reader = new StreamReader(stream);
-            string? installed = null;
-            string? manifest = null;
-            bool inCurrentBlock = false;
-            string? line;
-            while ((line = reader.ReadLine()) != null)
-            {
-                if (line.Contains(marker, StringComparison.Ordinal))
-                {
-                    // 新一次启动：块内重找，旧块残留作废
-                    inCurrentBlock = true;
-                    installed = null;
-                    manifest = null;
-                    continue;
-                }
-                if (!inCurrentBlock) continue;
-                if (!line.Contains("steam_client", StringComparison.Ordinal)) continue;
-                var mi = Regex.Match(line, @"installed version (\d+)");
-                if (mi.Success && mi.Groups[1].Value != "0")
-                {
-                    installed = mi.Groups[1].Value;
-                    continue;
-                }
-                // installed 为 0/缺失：取同行 manifest 的 version（刚切换版本的过渡期用）。
-                // 只认下载行，避免 existing pending version 之类的数字误命中。
-                if (!line.Contains("Download", StringComparison.Ordinal)) continue;
-                var mv = Regex.Match(line, @"version (\d+)");
-                if (mv.Success && mv.Groups[1].Value != "0")
-                    manifest = mv.Groups[1].Value;
-            }
-            var buildId = installed ?? manifest ?? "未知";
-            LogService.Info("内核", $"识别到 Steam 构建ID：{buildId}");
-            return buildId;
-        }
-        catch (Exception ex)
-        {
-            LogService.Warn("内核", $"读取 Steam 构建ID失败：{ex.Message}");
-            return "未知";
-        }
-    }
 }
