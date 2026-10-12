@@ -961,6 +961,64 @@ public partial class TrainerViewModel : ObservableObject, IDisposable
     }
 
     [RelayCommand]
+    private void CreateDesktopShortcut(DownloadedTrainerItem? item)
+    {
+        if (item == null || string.IsNullOrWhiteSpace(item.FilePath)) return;
+        if (!File.Exists(item.FilePath))
+        {
+            StatusMessage = "文件不存在，无法创建快捷方式";
+            return;
+        }
+        try
+        {
+            var desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            var stem = SanitizeFileName(item.DisplayName ?? string.Empty);
+            if (string.IsNullOrWhiteSpace(stem))
+                stem = Path.GetFileNameWithoutExtension(item.FileName);
+            if (string.IsNullOrWhiteSpace(stem))
+                stem = "修改器快捷方式";
+            var lnkPath = Path.Combine(desktop, stem + ".lnk");
+            if (File.Exists(lnkPath))
+            {
+                StatusMessage = $"桌面已存在“{stem}.lnk”，未重复创建";
+                return;
+            }
+            var shellType = Type.GetTypeFromProgID("WScript.Shell");
+            if (shellType == null)
+            {
+                StatusMessage = "系统缺少 WSH 组件，无法创建快捷方式";
+                return;
+            }
+            var shell = Activator.CreateInstance(shellType);
+            if (shell == null)
+            {
+                StatusMessage = "系统缺少 WSH 组件，无法创建快捷方式";
+                return;
+            }
+            // 晚绑定调用，不引入 COM 引用（dotnet build 不支持 ResolveComReference）
+            var shortcut = shellType.InvokeMember("CreateShortcut", BindingFlags.InvokeMethod,
+                null, shell, [lnkPath]);
+            if (shortcut == null)
+            {
+                StatusMessage = "创建快捷方式失败：系统组件无响应";
+                return;
+            }
+            var shortcutType = shortcut.GetType();
+            var dir = Path.GetDirectoryName(item.FilePath) ?? string.Empty;
+            shortcutType.InvokeMember("TargetPath", BindingFlags.SetProperty, null, shortcut, [item.FilePath]);
+            shortcutType.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, shortcut, [dir]);
+            shortcutType.InvokeMember("IconLocation", BindingFlags.SetProperty, null, shortcut, [item.FilePath + ",0"]);
+            shortcutType.InvokeMember("Description", BindingFlags.SetProperty, null, shortcut, [item.DisplayName]);
+            shortcutType.InvokeMember("Save", BindingFlags.InvokeMethod, null, shortcut, null);
+            StatusMessage = $"已创建桌面快捷方式：{stem}.lnk";
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"创建快捷方式失败：{ex.Message}";
+        }
+    }
+
+    [RelayCommand]
     private async Task DeleteDownloadedFileAsync(DownloadedTrainerItem? item)
     {
         if (item == null || string.IsNullOrWhiteSpace(item.FilePath)) return;
