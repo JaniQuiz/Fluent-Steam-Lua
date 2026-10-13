@@ -41,6 +41,8 @@ public bool ShowTrainerSections { get; set; } = true;
     public string EncryptedGuardData { get; set; } = string.Empty;
     // 免启动破解用的 Steam Web API Key（选填）：补全模拟器成就/库存信息，不填则跳过
     public string CrackWebApiKey { get; set; } = string.Empty;
+    // 入库页热门榜单开关（显示设置）：默认开，老配置缺键时反序列化保留 true
+    public bool ShowRanking { get; set; } = true;
 }
 
 public interface ISettingsService

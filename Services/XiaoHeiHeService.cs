@@ -1,5 +1,6 @@
 using System.Net.Http;
 using System.Text.Json;
+using SteamLuaManager.Models;
 
 namespace SteamLuaManager.Services;
 
@@ -138,6 +139,98 @@ public static class XiaoHeiHeService
             LogService.Warn("入库", $"小黑盒详情异常 AppID {appId}，转备用源：{ex.Message}");
             return (null, null, "");
         }
+    }
+
+    // 热门榜单：单次最多 30 条，翻页可深挖（实测 330+ 条无重复，内容固定）；
+    // 深页非严格按关注排序，但条目稳定，可放心拼前 N
+    private const string RankUrl = "https://api.xiaoheihe.cn/game/web/all_recommend/games/?os_type=web&version=999.0.0&show_type=popular&limit={0}&offset={1}";
+
+    // 热门池：并行拉多页拼起来，单页失败不影响其他页
+    public static async Task<List<RankGame>> GetPopularPoolAsync(int total = 120, CancellationToken ct = default)
+    {
+        var pageTasks = new List<Task<List<RankGame>>>();
+        for (var offset = 0; offset < total; offset += 30)
+            pageTasks.Add(GetRankPageAsync(offset, Math.Min(30, total - offset), ct));
+        var pages = await Task.WhenAll(pageTasks).ConfigureAwait(false);
+        var seen = new HashSet<int>();
+        var all = new List<RankGame>();
+        foreach (var page in pages)
+            foreach (var g in page)
+                if (seen.Add(g.AppId))
+                    all.Add(g);
+        return all.Take(total).ToList();
+    }
+
+    private static async Task<List<RankGame>> GetRankPageAsync(int offset, int limit, CancellationToken ct)
+    {
+        var result = new List<RankGame>();
+        try
+        {
+            using var resp = await _http.GetAsync(string.Format(RankUrl, limit, offset), ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                LogService.Warn("入库", $"小黑盒热门榜失败（HTTP {(int)resp.StatusCode}）");
+                return result;
+            }
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+            if (!doc.RootElement.TryGetProperty("result", out var r) ||
+                !r.TryGetProperty("list", out var list) ||
+                list.ValueKind != JsonValueKind.Array)
+            {
+                LogService.Info("入库", "小黑盒热门榜无有效结果");
+                return result;
+            }
+            foreach (var g in list.EnumerateArray())
+            {
+                try
+                {
+                    if (!TryGetRankAppId(g, out var appId)) continue;
+                    var name = g.TryGetProperty("game_name", out var n) ? n.GetString() ?? "" : "";
+                    if (string.IsNullOrWhiteSpace(name) && g.TryGetProperty("name", out var n2))
+                        name = n2.GetString() ?? "";
+                    if (string.IsNullOrWhiteSpace(name)) continue;
+                    var cover = g.TryGetProperty("game_img", out var c) ? c.GetString() ?? "" : "";
+                    var covers = new List<string>();
+                    if (!string.IsNullOrWhiteSpace(cover)) covers.Add(cover);
+                    var fallback = $"https://cdn.cloudflare.steamstatic.com/steam/apps/{appId}/header.jpg";
+                    if (!covers.Contains(fallback)) covers.Add(fallback);
+                    long follow = 0;
+                    if (g.TryGetProperty("follow_num", out var f))
+                    {
+                        if (f.ValueKind == JsonValueKind.Number) follow = f.GetInt64();
+                        else if (f.ValueKind == JsonValueKind.String && long.TryParse(f.GetString(), out var fs)) follow = fs;
+                    }
+                    result.Add(new RankGame(appId, name, covers[0], covers, follow));
+                    if (result.Count >= limit) break;
+                }
+                catch { }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            LogService.Warn("入库", $"小黑盒热门榜异常，转空榜：{ex.Message}");
+        }
+        return result;
+    }
+
+    private static bool TryGetRankAppId(JsonElement g, out int appId)
+    {
+        appId = 0;
+        if (!g.TryGetProperty("appid", out var aid)) return false;
+        if (aid.ValueKind == JsonValueKind.Number)
+        {
+            if (!aid.TryGetInt32(out appId) || appId <= 0) return false;
+        }
+        else if (aid.ValueKind == JsonValueKind.String)
+        {
+            if (!int.TryParse(aid.GetString(), out appId) || appId <= 0) return false;
+        }
+        else return false;
+        return true;
     }
 
     // 归一化：去标点空白后比对，中英文名含冒号空格等不影响命中

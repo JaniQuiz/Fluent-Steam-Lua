@@ -81,6 +81,22 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
     public ObservableCollection<FoundGame> SearchResults { get; } = new();
     public ObservableCollection<string> LogLines { get; } = new();
 
+    // 小黑盒热门榜单：会话内临时展示，封面名字不落盘（加载成功失败都不写日志文件）
+    public ObservableCollection<RankGame> PopularRanking { get; } = new();
+    public ObservableCollection<RankGame> RecommendRanking { get; } = new();
+
+    [ObservableProperty]
+    private bool _showRanking = true;
+
+    [ObservableProperty]
+    private bool _isRankingLoading;
+
+    private CancellationTokenSource? _rankingCts;
+
+    // 榜单与日志区互斥：开着开关、日志为空、任一榜单有数据时才展示榜单区
+    public bool IsRankingVisible => ShowRanking && LogLines.Count == 0 &&
+        (PopularRanking.Count > 0 || RecommendRanking.Count > 0);
+
     public ScriptDownloadViewModel(ISteamPathService steamPathService, ISteamDepotService depotService, ISettingsService settingsService, IHttpClientProvider httpClientProvider, ISteamApiService steamApiService, IDialogService dialogService)
     {
         _steamPathService = steamPathService;
@@ -89,10 +105,15 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         _httpClientProvider = httpClientProvider;
         _steamApiService = steamApiService;
         _dialogService = dialogService;
-        _currentDownloadMode = _settingsService.Load().DownloadMode;
+        var bootSettings = _settingsService.Load();
+        _currentDownloadMode = bootSettings.DownloadMode;
+        ShowRanking = bootSettings.ShowRanking;
         _settingsService.SettingsChanged += OnSettingsChanged;
         _depotService.AllSourcesUpdated += OnAllSourcesUpdated;
         SearchResults.CollectionChanged += (_, _) => RefreshSearchEmptyVisible();
+        LogLines.CollectionChanged += (_, _) => OnPropertyChanged(nameof(IsRankingVisible));
+        PopularRanking.CollectionChanged += (_, _) => OnPropertyChanged(nameof(IsRankingVisible));
+        RecommendRanking.CollectionChanged += (_, _) => OnPropertyChanged(nameof(IsRankingVisible));
         OnPropertyChanged(nameof(LastUpdateTimeText));
     }
 
@@ -108,11 +129,83 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
 
     private void OnSettingsChanged(AppSettings settings)
     {
-        if (_currentDownloadMode == settings.DownloadMode) return;
+        if (_currentDownloadMode == settings.DownloadMode && ShowRanking == settings.ShowRanking) return;
         _currentDownloadMode = settings.DownloadMode;
+        ShowRanking = settings.ShowRanking;
         OnPropertyChanged(nameof(IsLocalCacheMode));
         OnPropertyChanged(nameof(CurrentDataSourceLabel));
         OnPropertyChanged(nameof(LastUpdateTimeText));
+    }
+
+    partial void OnShowRankingChanged(bool value) => OnPropertyChanged(nameof(IsRankingVisible));
+
+    // 进页刷新榜单：首次进页（或之前没拉到）且开着开关时懒加载；切页离开 MainWindow 会清空日志，回来自动复现
+    public void OnNavigatedTo()
+    {
+        OnPropertyChanged(nameof(IsRankingVisible));
+        if (ShowRanking && (PopularRanking.Count == 0 || RecommendRanking.Count == 0) && !IsRankingLoading)
+            _ = LoadRankingAsync();
+    }
+
+    private async Task LoadRankingAsync()
+    {
+        try { _rankingCts?.Cancel(); } catch { }
+        try { _rankingCts?.Dispose(); } catch { }
+        var cts = new CancellationTokenSource();
+        _rankingCts = cts;
+        IsRankingLoading = true;
+        try
+        {
+            // 热门池一次拉 120（4 页并行）：前 10 为热门榜单，剩下洗牌抽 10 为你推荐，两排不重样
+            var pool = await XiaoHeiHeService.GetPopularPoolAsync(120, cts.Token);
+            PopularRanking.Clear();
+            foreach (var g in pool.Take(10))
+                PopularRanking.Add(g);
+            var rest = pool.Skip(PopularRanking.Count).ToList();
+            var rng = Random.Shared;
+            for (var i = rest.Count - 1; i > 0; i--)
+            {
+                var j = rng.Next(i + 1);
+                (rest[i], rest[j]) = (rest[j], rest[i]);
+            }
+            RecommendRanking.Clear();
+            foreach (var g in rest.Take(10))
+                RecommendRanking.Add(g);
+            // 只进 app.log 不进 LogLines：写 UI 日志会触发榜单隐藏规则
+            LogService.Info("入库", $"热门榜单已加载 {PopularRanking.Count} 款，为你推荐已加载 {RecommendRanking.Count} 款");
+            if (PopularRanking.Count == 0 && RecommendRanking.Count == 0)
+                StatusMessage = "榜单暂无数据，稍后切页回来重试";
+        }
+        catch (OperationCanceledException)
+        {
+            // 切页/退出打断，不管
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"热门榜单加载失败：{ex.Message}";
+            LogService.Warn("入库", $"热门榜单加载失败：{ex.Message}");
+        }
+        finally
+        {
+            IsRankingLoading = false;
+            if (ReferenceEquals(_rankingCts, cts))
+            {
+                try { _rankingCts?.Dispose(); } catch { }
+                _rankingCts = null;
+            }
+            else
+            {
+                try { cts.Dispose(); } catch { }
+            }
+        }
+    }
+
+    // 榜单卡片一键入库：和搜索结果走同一个入库流程；入库开始即清日志写日志，榜单自动隐藏
+    [RelayCommand]
+    private async Task DownloadRankGameAsync(RankGame? game)
+    {
+        if (game == null || IsDownloading) return;
+        await ExecuteDownloadAsync(game.AppId.ToString());
     }
 
     private void OnAllSourcesUpdated()
@@ -129,6 +222,9 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         try { _downloadCts?.Cancel(); } catch { }
         _downloadCts?.Dispose();
         _downloadCts = null;
+        try { _rankingCts?.Cancel(); } catch { }
+        try { _rankingCts?.Dispose(); } catch { }
+        _rankingCts = null;
     }
 
     // 切页离开时由 MainWindow 调用：在飞的入库任务取消，UI 已清空不再有幽灵进度
@@ -896,6 +992,8 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
     {
         LogLines.Clear();
         SearchResults.Clear();
+        // 搜过标记也要复位，否则“未找到匹配”空提示会赖着不走
+        ResetSearchState();
         StatusMessage = "日志已清除";
     }
 }

@@ -121,6 +121,7 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
         AutoCheckKernelUpdateEnabled = _settings.AutoCheckKernelUpdateEnabled;
         AutoRefreshKeyCache = _settings.AutoRefreshKeyCache;
         IsShowTrainerSections = _settings.ShowTrainerSections;
+        ShowRanking = _settings.ShowRanking;
         IsShowCopyLogButton = _settings.ShowCopyLogButton;
         EnableLogging = _settings.EnableLogging;
         MinimizeToTray = _settings.MinimizeToTray;
@@ -757,6 +758,7 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
     private bool _isShowTrainerSections = true;
 
     [ObservableProperty]
+    private bool _showRanking = true;    [ObservableProperty]
     private bool _friendBroadcastEnabled = true;
 
     [ObservableProperty]
@@ -1025,6 +1027,14 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
         _settingsService.Save(_settings);
         StatusMessage = value ? "修改器推荐栏目已显示" : "修改器推荐栏目已隐藏";
         LogService.Info("设置", value ? "修改器推荐栏目已显示" : "修改器推荐栏目已隐藏");
+    }
+
+    partial void OnShowRankingChanged(bool value)
+    {
+        _settings.ShowRanking = value;
+        _settingsService.Save(_settings);
+        StatusMessage = value ? "入库热门榜单已显示" : "入库热门榜单已隐藏";
+        LogService.Info("设置", value ? "入库热门榜单已显示" : "入库热门榜单已隐藏");
     }
 
     [ObservableProperty]

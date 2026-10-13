@@ -671,6 +671,10 @@ public partial class MainWindow : Window
         {
             _ = _trainerViewModel.LoadSectionsCommand.ExecuteAsync(null);
         }
+        else if (tag == "ScriptDownload")
+        {
+            _scriptDownloadViewModel.OnNavigatedTo();
+        }
         else if (tag == "Achievement")
         {
             _ = _achievementViewModel.EnsureLoadedAsync();

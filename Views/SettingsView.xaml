@@ -257,6 +257,13 @@ Style="{StaticResource SettingsCardStyle}">
                                              OnContent="开" OffContent="关"/>
                         </ui:SettingsCard>
 
+                        <ui:SettingsCard Header="入库热门榜单" Margin="0,0,0,8"
+                                         Description="入库页无日志输出时展示热门榜单与为你推荐"
+Style="{StaticResource SettingsCardStyle}">
+                            <ui:ToggleSwitch IsOn="{Binding ShowRanking}"
+                                             OnContent="开" OffContent="关"/>
+                        </ui:SettingsCard>
+
                         <ui:SettingsCard Header="修改器推荐栏目" Margin="0,0,0,8"
                                          Description="修改器界面的热门推荐和最新发布栏目"
 Style="{StaticResource SettingsCardStyle}">

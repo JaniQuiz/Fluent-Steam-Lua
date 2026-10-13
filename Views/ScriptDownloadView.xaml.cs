@@ -6,6 +6,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Diagnostics;
 using iNKORE.UI.WPF.Modern.Controls;
+using SteamLuaManager.Models;
 using SteamLuaManager.Services;
 using SteamLuaManager.ViewModels;
 
@@ -108,10 +109,20 @@ public partial class ScriptDownloadView : UserControl
     private void SearchCover_ImageFailed(object sender, ExceptionRoutedEventArgs e)
     {
         if (sender is not Image img) return;
-        if (img.DataContext is not ScriptDownloadViewModel.FoundGame game) return;
-        var candidates = game.CoverCandidates;
+        List<string>? candidates = null;
+        string fallbackUrl = "";
+        if (img.DataContext is ScriptDownloadViewModel.FoundGame game)
+        {
+            candidates = game.CoverCandidates;
+            fallbackUrl = game.CoverUrl;
+        }
+        else if (img.DataContext is RankGame rank)
+        {
+            candidates = rank.CoverCandidates;
+            fallbackUrl = rank.CoverUrl;
+        }
         if (candidates == null || candidates.Count == 0) return;
-        var current = NormUrl((img.Source as BitmapImage)?.UriSource?.ToString() ?? game.CoverUrl);
+        var current = NormUrl((img.Source as BitmapImage)?.UriSource?.ToString() ?? fallbackUrl);
         var idx = candidates.FindIndex(u => string.Equals(NormUrl(u), current, StringComparison.OrdinalIgnoreCase));
         for (var i = idx + 1; i < candidates.Count; i++)
         {
