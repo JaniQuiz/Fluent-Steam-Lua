@@ -2,7 +2,9 @@ using System.Net;
 using System.Net.Http;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.IO;
 using System.Linq;
+using System.Security.Authentication;
 using Microsoft.Win32;
 
 namespace SteamLuaManager.Services;
@@ -168,12 +170,17 @@ public sealed class HttpClientProvider : IHttpClientProvider, IDisposable
         }
     }
 
-    // 顺着 InnerException 找连接级根因：直连被拒/代理失联都算，触发快照强制刷新
+    // 顺着 InnerException 找连接级根因：直连被拒/代理失联/TLS 握手被 RST 都算，触发快照强制刷新
+    // （刷新只是重读一次注册表，代价可忽略；中途开关梯子下次重试立刻吃到新配置）
     private static bool IsConnectionFailure(Exception ex)
     {
         for (var e = ex; e != null; e = e.InnerException)
         {
             if (e is SocketException) return true;
+            // SocketException 继承 IOException，这里兜住断流、DNS 失败等其他 IO 根因
+            if (e is IOException) return true;
+            // TLS 握手失败（GFW RST 常见形态）：HttpRequestException 包 AuthenticationException
+            if (e is AuthenticationException) return true;
             if (e is HttpRequestException { StatusCode: HttpStatusCode.ProxyAuthenticationRequired }) return true;
         }
         return false;
@@ -242,7 +249,9 @@ public sealed class HttpClientProvider : IHttpClientProvider, IDisposable
                 return new ProxySnapshot($"auto|{autoConfigUrl}|{http}|{https}", systemProxy, true);
             }
 
-            return new ProxySnapshot("direct", null, false);
+            // 既无显式代理也无 PAC：不要强制直连，交还系统默认代理链
+            // （它还包含“自动检测设置”WPAD，浏览器走的就是这条；强制直连反而比 new HttpClient() 默认行为更差）
+            return new ProxySnapshot("system", WebRequest.GetSystemWebProxy(), true);
         }
         catch
         {
@@ -285,6 +294,11 @@ public sealed class HttpClientProvider : IHttpClientProvider, IDisposable
 
     private static bool ShouldRefreshClient(Exception ex)
     {
+        // 用户主动取消（token 已取消）绝不重试：否则取消反馈邮件这类 POST 会被重复发送出去；
+        // 超时是内层包 TimeoutException 的 TaskCanceledException，不受这条影响，照常重试
+        if (ex is OperationCanceledException oce && oce.CancellationToken.IsCancellationRequested &&
+            oce.InnerException is not TimeoutException)
+            return false;
         // ObjectDisposed 表示共享连接被并发的 Reset 拆掉，重建一次即可自愈
         return ex is HttpRequestException or TaskCanceledException or ObjectDisposedException ||
                 ex.InnerException is HttpRequestException or WebException;

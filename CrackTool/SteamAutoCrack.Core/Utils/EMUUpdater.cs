@@ -28,11 +28,24 @@ namespace SteamAutoCrack.Core.Utils
             Timeout = TimeSpan.FromSeconds(60)
         };
 
+        // 大包下载专用：Timeout 是整单（含 body 读取）总时长，60 秒在慢线路上 13MB 包必超时；
+        // 查询接口仍走上面的 60 秒 client，卡住不至于拖太久
+        private static readonly HttpClient _downloadClient = new()
+        {
+            Timeout = TimeSpan.FromMinutes(10)
+        };
+
         static EMUUpdater()
         {
-            if (!_httpClient.DefaultRequestHeaders.Contains("User-Agent"))
+            SetDefaultUserAgent(_httpClient);
+            SetDefaultUserAgent(_downloadClient);
+        }
+
+        private static void SetDefaultUserAgent(HttpClient client)
+        {
+            if (!client.DefaultRequestHeaders.Contains("User-Agent"))
             {
-                _httpClient.DefaultRequestHeaders.Add("User-Agent",
+                client.DefaultRequestHeaders.Add("User-Agent",
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/57.0.2987.133 Safari/537.36");
             }
         }
@@ -276,7 +289,7 @@ namespace SteamAutoCrack.Core.Utils
 
         private static async Task DownloadFileAsync(string url, string destinationPath, long expectedSize)
         {
-            using var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
+            using var response = await _downloadClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
             response.EnsureSuccessStatusCode();
 
             await using (var fileStream = File.Create(destinationPath))
