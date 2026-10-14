@@ -2,6 +2,8 @@ using System.IO;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
+using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -499,9 +501,7 @@ public class OpenSteamToolService : IOpenSteamToolService
 
     // 与内核同源：hazre/steam-monitor（自动采集 stable+beta，文件更全），
     // 布局与 OpenSteam001 版差异：channel 是 main 下目录而非分支，分支固定 main
-    private static string JsdelivrTomlUrl(string channel, string component, string sha)
-        => $"https://cdn.jsdelivr.net/gh/hazre/steam-monitor@main/{channel}/{component}/{sha}.toml";
-
+    // jsdelivr 对这个大仓库响应不稳定，只走镜像链 + raw 直连
     private static string GitHubTomlUrl(string channel, string component, string sha)
         => $"https://raw.githubusercontent.com/hazre/steam-monitor/main/{channel}/{component}/{sha}.toml";
 
@@ -543,22 +543,30 @@ public class OpenSteamToolService : IOpenSteamToolService
             Directory.CreateDirectory(dir);
             downloadProgress?.Report(i * 100 / TomlTargets.Length);
 
-            // 与内核一致：优先 jsdelivr，失败再走 github；同名文件直接覆盖
-            var urls = new[] { JsdelivrTomlUrl(channel, component, sha), GitHubTomlUrl(channel, component, sha) };
+            // 下载源：跟随接口设置的镜像偏好展开 raw 镜像链（直连垫底）；
+            // raw 直连亲口 404 = 上游确实没这个文件，后面不用再试
+            string? mirror;
+            try { mirror = _settingsService.Load().ManifestMirror; }
+            catch { mirror = null; }
+            var directRaw = GitHubTomlUrl(channel, component, sha);
+            var urls = GitHubMirror.ManifestRawMirrors(directRaw, mirror);
             Exception? lastError = null;
             // 404 单独记：两个源全 404=上游没这个版本（让用户更新正式版）；
             // 混进任何一个非 404 失败=网络问题（让用户查网络），advice 不能混
             var notFoundOnly = true;
+            var direct404 = false;
             var done = false;
             foreach (var url in urls)
             {
                 try
                 {
-                    status?.Report($"正在下载 {fileName}...");
+                    status?.Report($"正在通过 {GitHubMirror.SourceDisplayName(url)} 下载 {fileName}...");
                     var bytes = await _httpClientProvider.SendWithProxyRetryAsync(
                         "ost-toml",
                         TimeSpan.FromSeconds(30),
-                        client => client.GetByteArrayAsync(url, ct));
+                        client => client.GetByteArrayAsync(url, ct),
+                        null,
+                        2);
                     if (bytes == null || bytes.Length == 0) throw new InvalidOperationException("远端返回空内容");
                     // 原子替换：先落临时文件再搬家，崩溃也不留截断文件祸害已存在的源文件
                     var tmpPath = targetPath + ".tmp";
@@ -577,21 +585,51 @@ public class OpenSteamToolService : IOpenSteamToolService
                     done = true;
                     break;
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
+                catch (Exception ex)
                 {
+                    // 用户主动取消直接向上传；超时是 TaskCanceledException 但 token 没取消，
+                    // 按单源失败处理继续试下一个源，否则一次超时就 abort 整个流程
+                    if (ex is OperationCanceledException && ct.IsCancellationRequested)
+                        throw;
                     lastError = ex;
-                    if (ex is not HttpRequestException { StatusCode: HttpStatusCode.NotFound })
+                    var is404 = ex is HttpRequestException { StatusCode: HttpStatusCode.NotFound };
+                    if (!is404)
                         notFoundOnly = false;
+                    // raw 直连的 404 是权威的，见到它直接定性缺文件
+                    if (is404 && GitHubMirror.IsDirectUrl(url))
+                    {
+                        direct404 = true;
+                        break;
+                    }
                     LogService.Warn("内核", $"toml 下载源失败 ({url}): {ex.Message}");
                 }
             }
 
             if (!done)
-                results.Add(new TomlFetchResult(fileName, targetPath, false, lastError?.Message ?? "下载失败", notFoundOnly));
+                results.Add(new TomlFetchResult(fileName, targetPath, false, FriendlyTomlError(lastError), notFoundOnly || direct404));
         }
 
         downloadProgress?.Report(100);
         return results;
+    }
+
+    // 弹窗里别甩英文原文：SSL/RST 报网络，超时报超时，其他保留原文方便定位
+    private static string FriendlyTomlError(Exception? ex)
+    {
+        if (ex == null) return "下载失败";
+        for (var e = ex; e != null; e = e.InnerException)
+        {
+            if (e is AuthenticationException)
+                return "连接失败（TLS/SSL 被中断，常见于网络波动或代理不稳），请检查网络或代理后重试";
+            if (e is SocketException)
+                return "连接失败（网络不可达），请检查网络或代理后重试";
+        }
+        if (ex is TaskCanceledException)
+            return "下载超时，请重试";
+        var msg = ex.Message;
+        if (!string.IsNullOrEmpty(msg) && msg.Contains("SSL", StringComparison.OrdinalIgnoreCase))
+            return "连接失败（TLS/SSL 被中断，常见于网络波动或代理不稳），请检查网络或代理后重试";
+        return string.IsNullOrEmpty(msg) ? "下载失败" : msg;
     }
 
 }

@@ -128,7 +128,7 @@ public partial class AppIdQueryViewModel : ObservableObject, IDisposable
         _ => false,
     };
 
-    // 无类型候选逐个定性：appdetails 不支持批量逗号（400），只能逐个问；查不到的不拦
+    // 无类型候选逐个定性：appdetails 不支持一次传多个 id，只能逐个问；查不到的不拦
     private async Task DropNonGamesByAppDetailsAsync(List<HeiHeGame> list, CancellationToken ct)
     {
         var unknowns = list.Where(g => string.IsNullOrEmpty(g.Type)).Select(g => g.AppId).Distinct().ToList();

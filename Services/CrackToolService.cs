@@ -111,7 +111,7 @@ public sealed class CrackToolService : ICrackToolService, IDisposable
             EnsureInitialized(log);
             _runHadError = false;
             var updater = new EMUUpdater();
-            // 跟随接口设置的镜像偏好组装候选源（直连/镜像逐个试）；用户要求见日志用哪条
+            // 跟随接口设置的镜像偏好组装候选源并逐个试；日志里标清每个源走直连还是镜像，方便定位用哪条下的包
             string? mirror;
             try { mirror = _settingsService.Load().ManifestMirror; }
             catch { mirror = null; }

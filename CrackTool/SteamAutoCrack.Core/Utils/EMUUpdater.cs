@@ -28,8 +28,8 @@ namespace SteamAutoCrack.Core.Utils
             Timeout = TimeSpan.FromSeconds(60)
         };
 
-        // 大包下载专用：Timeout 是整单（含 body 读取）总时长，60 秒在慢线路上 13MB 包必超时；
-        // 查询接口仍走上面的 60 秒 client，卡住不至于拖太久
+        // 大包下载单独用长超时 client：整单总时长含 body 读取，慢线路不断连；
+        // 查询接口仍走短超时的 client，卡住不至于拖太久
         private static readonly HttpClient _downloadClient = new()
         {
             Timeout = TimeSpan.FromMinutes(10)
@@ -242,8 +242,7 @@ namespace SteamAutoCrack.Core.Utils
                     foreach (var asset in assets.EnumerateArray())
                     {
                         var name = asset.GetProperty("name").GetString();
-                        // 只要 release 包：debug 包解出来是 debug/ 目录，根本装不上；
-                        // vs 工具集后缀会变（vs22/vs26…），按名字取最新，不写死
+                        // 只认 release 包（debug 包目录结构装不上）；工具集后缀会变，按名字取最新，不写死完整文件名
                         if (name != null && name.StartsWith("emu-win-release", StringComparison.OrdinalIgnoreCase)
                             && name.EndsWith(".7z", StringComparison.OrdinalIgnoreCase)
                             && (bestName == null || string.Compare(name, bestName, StringComparison.Ordinal) > 0))

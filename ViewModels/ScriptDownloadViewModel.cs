@@ -156,7 +156,7 @@ public partial class ScriptDownloadViewModel : ObservableObject, IDisposable
         IsRankingLoading = true;
         try
         {
-            // 热门池一次拉 120（4 页并行）：前 10 为热门榜单，剩下洗牌抽 10 为你推荐，两排不重样
+            // 热门池按页拉满后切分：头部直出热门榜单，剩余洗牌抽取为你推荐，两排不重样
             var pool = await XiaoHeiHeService.GetPopularPoolAsync(120, cts.Token);
             PopularRanking.Clear();
             foreach (var g in pool.Take(10))

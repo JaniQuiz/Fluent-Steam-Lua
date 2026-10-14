@@ -49,7 +49,7 @@ public partial class CrackToolViewModel : ObservableObject, IDisposable
 
     private Timer? _statusMessageTimer;
 
-    // 通知 3 秒自动消失，跟主页逻辑一致
+    // 通知短暂展示后自动清空，跟主页逻辑一致
     partial void OnStatusMessageChanged(string value)
     {
         _statusMessageTimer?.Dispose();

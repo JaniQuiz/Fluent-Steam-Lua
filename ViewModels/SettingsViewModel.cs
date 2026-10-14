@@ -1078,7 +1078,7 @@ public class SpeedTestItem
     public long LatencyMs { get; set; }
     public bool IsSuccess { get; set; }
     public string StatusText => IsSuccess ? $"{LatencyMs}ms" : "失败";
-    // 镜像加速源与封面 CDN 共用：500ms 内绿、500~2000 橙、以外红；
+    // 镜像加速源与封面 CDN 共用：延迟分三档着色；
     // 上游清单源（ManifestTestResult）是独立的红绿两色，不走这里
     public string ColorCode => IsSuccess ? LatencyMs switch
     {

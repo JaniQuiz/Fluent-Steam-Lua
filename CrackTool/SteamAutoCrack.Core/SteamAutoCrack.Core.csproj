@@ -4,7 +4,7 @@
     <TargetFramework>net8.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <!-- 随主程序跑 x64：全仓无位数敏感代码，强制 x86 已移除 -->
+    <!-- 随主程序跑 x64：全仓无位数敏感代码，不编译 x86 -->
     <Version>3.5.1.0</Version>
   </PropertyGroup>
 

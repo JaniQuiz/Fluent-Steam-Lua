@@ -141,8 +141,7 @@ public static class XiaoHeiHeService
         }
     }
 
-    // 热门榜单：单次最多 30 条，翻页可深挖（实测 330+ 条无重复，内容固定）；
-    // 深页非严格按关注排序，但条目稳定，可放心拼前 N
+    // 热门榜单接口按页返回，翻页拼满榜单池；深页条目同样固定不会跳变
     private const string RankUrl = "https://api.xiaoheihe.cn/game/web/all_recommend/games/?os_type=web&version=999.0.0&show_type=popular&limit={0}&offset={1}";
 
     // 热门池：并行拉多页拼起来，单页失败不影响其他页

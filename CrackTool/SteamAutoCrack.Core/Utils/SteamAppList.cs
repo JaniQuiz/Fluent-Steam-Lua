@@ -1,7 +1,7 @@
 namespace SteamAutoCrack.Core.Utils;
 
-// 我移除了 SQLite 全量游戏列表库：DLC 名解析走商店接口直查，不再需要本地建库查库；
-// 保留同名空实现只是让其它生成器照常编译，实际调用方只有 DLC 名回退（等价于以前查不到时的行为）。
+// SQLite 游戏列表库的占位实现：DLC 名解析走商店接口直查，无需本地建库；
+// 同名空壳让其它生成器照常编译，未命中时返回空名走回退分支
 public class SteamApp
 {
     public uint? AppId { get; set; }

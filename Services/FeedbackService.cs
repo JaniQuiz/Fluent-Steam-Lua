@@ -59,7 +59,7 @@ public class FeedbackService : IFeedbackService
         var version = Assembly.GetExecutingAssembly().GetName().Version;
         var versionText = version is not null ? $"{version.Major}.{version.Minor}.{version.Build}" : "未知";
         var contactLine = string.IsNullOrWhiteSpace(contact) ? "未填写" : contact.Trim();
-        // 内核版本读本地 DLL（SHA/标记位解析），卡住超过 5 秒直接记未知，不拖提交
+        // 内核版本读本地 DLL 解析，超时直接记未知，不拖提交
         var kernelText = "未知";
         try
         {
