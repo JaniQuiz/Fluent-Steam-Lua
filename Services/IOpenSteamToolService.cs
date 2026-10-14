@@ -497,11 +497,13 @@ public class OpenSteamToolService : IOpenSteamToolService
         ("ipc", "steamclient"),
     ];
 
+    // 与内核同源：hazre/steam-monitor（自动采集 stable+beta，文件更全），
+    // 布局与 OpenSteam001 版差异：channel 是 main 下目录而非分支，分支固定 main
     private static string JsdelivrTomlUrl(string channel, string component, string sha)
-        => $"https://cdn.jsdelivr.net/gh/OpenSteam001/steam-monitor@{channel}/{component}/{sha}.toml";
+        => $"https://cdn.jsdelivr.net/gh/hazre/steam-monitor@main/{channel}/{component}/{sha}.toml";
 
     private static string GitHubTomlUrl(string channel, string component, string sha)
-        => $"https://raw.githubusercontent.com/OpenSteam001/steam-monitor/{channel}/{component}/{sha}.toml";
+        => $"https://raw.githubusercontent.com/hazre/steam-monitor/main/{channel}/{component}/{sha}.toml";
 
     public Task<SteamDllTomlInfo?> DetectSteamDllInfoAsync()
     {
